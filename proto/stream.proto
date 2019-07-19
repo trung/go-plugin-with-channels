@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package proto;
+
+option go_package = "proto";
+
+message EchoMsg {
+    string msg = 1;
+}
+
+service EchoService {
+    // Streaming responses
+    rpc Get(EchoMsg) returns (stream EchoMsg);
+    // Streaming requests
+    rpc Set(stream EchoMsg) returns (EchoMsg);
+}
