@@ -20,25 +20,29 @@ type Setter interface {
 	Set(stream chan string) (string, error)
 }
 
-type PluginGateway struct {
+type GetterStreamResponse interface {
+	Get2(msg string) (chan string, error)
+}
+
+type PluginConnector struct {
 	plugin.Plugin
 }
 
-func (*PluginGateway) GRPCServer(*plugin.GRPCBroker, *grpc.Server) error {
+func (*PluginConnector) GRPCServer(*plugin.GRPCBroker, *grpc.Server) error {
 	panic("implement me")
 }
 
-func (h *PluginGateway) GRPCClient(ctx context.Context, b *plugin.GRPCBroker, cc *grpc.ClientConn) (interface{}, error) {
-	return &pluginAdapter{
+func (h *PluginConnector) GRPCClient(ctx context.Context, b *plugin.GRPCBroker, cc *grpc.ClientConn) (interface{}, error) {
+	return &pluginGateway{
 		client: proto.NewEchoServiceClient(cc),
 	}, nil
 }
 
-type pluginAdapter struct {
+type pluginGateway struct {
 	client proto.EchoServiceClient
 }
 
-func (a *pluginAdapter) Set(stream chan string) (string, error) {
+func (a *pluginGateway) Set(stream chan string) (string, error) {
 	streamer, err := a.client.Set(context.Background())
 	if err != nil {
 		return "", err
@@ -55,7 +59,7 @@ func (a *pluginAdapter) Set(stream chan string) (string, error) {
 	return resp.Msg, nil
 }
 
-func (a *pluginAdapter) Get(msg string, rev chan string) error {
+func (a *pluginGateway) Get(msg string, rev chan string) error {
 	streamer, err := a.client.Get(context.Background(), &proto.EchoMsg{Msg: msg})
 	if err != nil {
 		return err
@@ -73,6 +77,32 @@ func (a *pluginAdapter) Get(msg string, rev chan string) error {
 	}
 }
 
+func (a *pluginGateway) Get2(msg string) (chan string, error) {
+	streamer, err := a.client.Get(context.Background(), &proto.EchoMsg{Msg: msg})
+	if err != nil {
+		return nil, err
+	}
+	rev := make(chan string)
+	go func() {
+		for {
+			resp, err := streamer.Recv()
+			if err == io.EOF {
+				close(rev)
+				err = streamer.CloseSend()
+				log.Println(err)
+				break
+			}
+			if err != nil {
+				close(rev)
+				log.Println(err)
+				break
+			}
+			rev <- resp.Msg
+		}
+	}()
+	return rev, nil
+}
+
 type pluginService struct {
 	client *plugin.Client
 }
@@ -86,7 +116,7 @@ func newPluginService() *pluginService {
 				MagicCookieKey:   "K",
 			},
 			Plugins: map[string]plugin.Plugin{
-				"p": &PluginGateway{},
+				"p": &PluginConnector{},
 			},
 			AllowedProtocols: []plugin.Protocol{plugin.ProtocolGRPC},
 			Cmd:              exec.Command(os.Getenv("PLUGIN_CMD")),
@@ -131,6 +161,18 @@ func (s *pluginService) Setter() (Setter, error) {
 	return p.(Setter), nil
 }
 
+func (s *pluginService) GetterStreamResponse() (GetterStreamResponse, error) {
+	c, err := s.client.Client()
+	if err != nil {
+		return nil, err
+	}
+	p, err := c.Dispense("p")
+	if err != nil {
+		return nil, err
+	}
+	return p.(GetterStreamResponse), nil
+}
+
 func main() {
 	service := newPluginService()
 	if err := service.Start(); err != nil {
@@ -139,6 +181,7 @@ func main() {
 	defer func() {
 		_ = service.Stop()
 	}()
+
 	log.Println("Getting stream responses")
 	getStreamer, err := service.Getter()
 	if err != nil {
@@ -153,6 +196,7 @@ func main() {
 	for m := range rev {
 		log.Println("stream: ", m)
 	}
+
 	log.Println("Setting stream requests")
 	setStreamer, err := service.Setter()
 	if err != nil {
@@ -172,4 +216,17 @@ func main() {
 		log.Fatal(err)
 	}
 	log.Println("Rev: ", msg)
+
+	log.Println("Getting stream responses 2")
+	getStreamer2, err := service.GetterStreamResponse()
+	if err != nil {
+		log.Fatal(err)
+	}
+	revChan, err := getStreamer2.Get2("Hello world")
+	if err != nil {
+		log.Fatal(err)
+	}
+	for m := range revChan {
+		log.Println("stream: ", m)
+	}
 }
